@@ -1,0 +1,408 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Nov 30 20:35:04 2017
+
+@author: Stanislav Bober
+"""
+
+# COMMON IMPORTS
+import numpy as np
+import scipy.interpolate
+import scipy.optimize
+import matplotlib.pyplot as plt
+import matplotlib
+import matplotlib.patches as patches
+
+font = {'family' : 'Times New Roman',
+        'size' : 22}
+matplotlib.rc('font', **font)
+#matplotlib inline
+
+from crtbp_prop import propCrtbp
+from find_vel import findVPlanes, findVLimits_debug
+from lagrange_pts import lagrange1, lagrange2
+from stop_funcs import stopFunCombined, iVarX, iVarVX, iVarY, iVarVY, iVarT, iVarR
+from orbit_geom import orbit_geom
+from jacobi import jacobi_const
+
+# constants
+Sm =  1.9891e30 # mass of the Sun
+Em =  5.97e24 # mass of the Earth
+ER =  1.496e8 # Sun-Earth distance
+mu1 = Sm / (Sm + Em) # CRTBP main coefficient
+L = [lagrange1(mu1), lagrange2(mu1)] # L1, L2 positions
+Ts = 365*24*60*60 / 2 / np.pi
+
+
+rtol = 1e-12 # integration relative tolerance
+rtol1 = 1e-15
+nmax = 1e6 # max number of integration steps
+int_param = {'atol':rtol, 'rtol':rtol, 'nsteps':nmax, 'method':'dop853'}
+int_param1 = {'atol':rtol1, 'rtol':rtol1, 'nsteps':nmax, 'method':'dop853'}
+
+# planes location
+dXkm = 800000
+leftpL2 = L[1] - dXkm / ER
+rightpL2 = L[1] + dXkm / ER
+topp = 1.0
+planesL2 = [leftpL2, rightpL2, topp]
+evL2_L = {'ivar':iVarX, 'stopval':  leftpL2, 'direction': 0, 'isterminal':True, 'corr':False}
+evL2_R = {'ivar':iVarX, 'stopval': rightpL2, 'direction': 0, 'isterminal':True, 'corr':False}
+evL2_U = {'ivar':iVarY, 'stopval':     topp, 'direction': 0, 'isterminal':True, 'corr':False}
+evL2_D = {'ivar':iVarY, 'stopval':    -topp, 'direction': 0, 'isterminal':True, 'corr':False}
+evL2 = {'left':[evL2_L], 'right':[evL2_R, evL2_D, evL2_U]}
+
+rightpL1 = L[0] + dXkm / ER
+leftpL1 = L[0] - dXkm / ER
+planesL1 = [leftpL1, rightpL1, topp]
+evL1_L = {'ivar':iVarX, 'stopval':  leftpL1, 'direction': 0, 'isterminal':True, 'corr':False}
+evL1_R = {'ivar':iVarX, 'stopval': rightpL1, 'direction': 0, 'isterminal':True, 'corr':False}
+evL1_U = {'ivar':iVarY, 'stopval':     topp, 'direction': 0, 'isterminal':True, 'corr':False}
+evL1_D = {'ivar':iVarY, 'stopval':    -topp, 'direction': 0, 'isterminal':True, 'corr':False}
+evL1 = {'left':[evL1_L], 'right':[evL1_R, evL1_D, evL1_U]}
+
+# plane which define orbits that goes to L1 region (from L1 in km)
+defPlanekm = 100000
+
+# 'small' halo orbit (see preprint https://yadi.sk/d/NaP0529tjsQdJ)
+#X0km = -277549
+#Z0km =  200000
+# 'big' halo orbit
+X0km = -453098
+Z0km =  500000
+
+
+# initial spacecraft state vector
+y0 = np.array([L[1] + X0km/ER, 0, Z0km/ER, 0, 0, 0])
+#y0 = np.array([L[1] + X0km/ER, 0, 0, 0, 0, 0])
+
+## events
+#eventY = {'ivar':iVarY, 'dvar':iVarVY, 'stopval':   0, 'direction':1, 'isterminal':True,  'corr':True}
+#eventL1 = {'ivar':iVarX, 'dvar':iVarVX, 'stopval': L[0]+defPlanekm/ER, 'direction': 0, 'isterminal':True, 'corr':True}
+#eventL2 = {'ivar':iVarX, 'dvar':iVarVX, 'stopval': rightpL2, 'direction': 0, 'isterminal':True, 'corr':True}
+#eventRE = {'ivar':iVarR, 'stopval': 8000/ER, 'direction': 0, 'isterminal':True, 'corr':False, 'kwargs':{'center':np.array([mu1,0.0,0.0])}}
+#eventL2out = {'ivar':iVarX, 'dvar':iVarVX, 'stopval': rightpL2, 'direction': 1, 'isterminal':True, 'corr':True}
+
+eventY = {'ivar':iVarY, 'dvar':iVarVY, 'stopval':   0, 'direction':1, 'isterminal':True,  'corr':True}
+eventL2 = {'ivar':iVarX, 'dvar':iVarVX, 'stopval': L[1]-defPlanekm/ER, 'direction': 1, 'isterminal':True, 'corr':True, 'count':2}
+eventL2out = {'ivar':iVarX, 'dvar':iVarVX, 'stopval': rightpL2, 'direction': 1, 'isterminal':True, 'corr':True}
+eventL1 = {'ivar':iVarX, 'dvar':iVarVX, 'stopval': leftpL1, 'direction': 0, 'isterminal':True, 'corr':True}
+eventRE = {'ivar':iVarR, 'stopval': 8000/ER, 'direction': 0, 'isterminal':True, 'corr':False, 'kwargs':{'center':np.array([mu1,0.0,0.0])}} ########?
+
+
+Nmanif = 360
+
+recalc = [1, 1, 1]
+
+if recalc[0]: # some speedup hack
+    # find initial velocity for halo orbit
+    v = findVPlanes(mu1, y0, 90, planesL2, 0.1, int_param=int_param1)
+    y0[3:5] += v
+    
+    ## integrate CRTBP equations of motion with event detection routine
+    evout = []
+    arr = propCrtbp(mu1, y0, [0, 2*np.pi], stopf=stopFunCombined, events = [eventY], out=evout, int_param=int_param1)
+    l = arr[:, 6]
+#    l = np.cumsum(np.linalg.norm(arr[1:,:3]-arr[:-1,:3], axis=1))
+    intrp = scipy.interpolate.interp1d(l, arr[:], axis=0, kind='cubic', copy=False)#, assume_sorted=False)
+    ls = np.linspace(l[0], l[-1], Nmanif)
+    pts = intrp(ls)
+    plt.gcf().set_size_inches((10,10))
+    plt.plot(pts[:,0], pts[:,1], '.')
+    plt.axis('equal')
+
+
+evout = []
+arr = pts
+
+# UNSTABLE MANIFOLD (TO EARTH)
+
+if recalc[1]: # some speedup hack
+    arr[:,3] -= 0.000001
+    ORB = []
+    all_ev = []
+    print('Unstable manifold calculation, N =', Nmanif)
+    for i in range(len(arr)):
+        evout = []
+        #arr1 = propCrtbp(mu1, arr[i,0:6], [0, 10*np.pi], stopf=stopFunCombined, events = [eventL2, eventL1, eventRE], out=evout, int_param=int_param)
+        
+        arr1 = propCrtbp(mu1, arr[i,0:6], [0, 100*np.pi], stopf=stopFunCombined, \
+                         events = [eventL2, eventL1, eventL2out, eventRE], out=evout, int_param=int_param)
+#        evout.pop(0)
+        if len(evout) > 0:
+            all_ev.append(evout[-1])
+            #all_ev.extend(evout)
+        else:
+            print('Alarm')
+#        else:
+            all_ev.append([-1, -1, arr1[-1]])
+    #    ax.plot(arr1[:,0],arr1[:,1],'#999999', alpha=0.5)
+        ORB.append(arr1)
+        print(i, end=' ')
+    
+    all_ev = np.array([[e[0], *e[2]] for e in all_ev])
+    zero_idx = np.where(all_ev[:,0]==0)[0]
+    zero_ev = all_ev[zero_idx]
+    one_idx = np.where((all_ev[:,0]!=0))[0]
+    one_ev = all_ev[one_idx]
+    zero_pts = arr[zero_idx]
+    one_pts = arr[one_idx]
+
+# calculate index gaps between zero-event orbits
+lwr = (zero_idx+1)[:-1]
+upr = (zero_idx-1)[1:]
+mask = lwr<=upr
+lwr,upr=lwr[mask],upr[mask]
+gaps=np.vstack((lwr, upr)).T
+
+# Transfer time plot
+#fig, ax = plt.subplots(1, 1)
+#fig.set_size_inches((15,10))
+#ax.plot(zero_idx, zero_ev[:,7], 'ob')
+#ax.add_patch(patches.Rectangle((0, ax.get_ylim()[0]), 
+#                               zero_idx[0],
+#                               ax.get_ylim()[1]-ax.get_ylim()[0],
+#                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+#ax.add_patch(patches.Rectangle((zero_idx[-1], ax.get_ylim()[0]), 
+#                               Nmanif-zero_idx[-1], 
+#                               ax.get_ylim()[1]-ax.get_ylim()[0],
+#                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+#for gap in gaps:
+#    ax.add_patch(patches.Rectangle((gap[0], ax.get_ylim()[0]), 
+#                                   gap[1]-gap[0], 
+#                                   ax.get_ylim()[1]-ax.get_ylim()[0],
+#                                   hatch='\\', fill=False, alpha=0.5, edgecolor='red'))
+#ax.set_xlim([0, Nmanif])
+
+#fig.savefig('time.png', transparent=True, dpi=300)
+
+# Long period orbits plot
+#maxtime = np.max(zero_ev[:,7])
+#mintime = np.min(zero_ev[:,7])
+#cmap = matplotlib.cm.get_cmap('hot')
+#fig, ax = plt.subplots(1, 1)
+#fig.set_size_inches((10,10))
+#ax.plot(L, [0,0], 'ok')
+#ax.text(L[1], 0, ' L2')
+#ax.text(L[0], 0, ' L1')
+#ax.plot(mu1, 0, 'ok')
+#ax.text(mu1, 0, ' Земля')
+#for i in zero_idx:
+#    e = all_ev[i]
+#    if e[7] > 6.5:
+#        ax.plot(ORB[i][:,0],ORB[i][:,1],color=cmap(1.0 - (e[7]-mintime)/(maxtime-mintime)), alpha=0.5)
+
+# Transfer time on orbit plot
+fig, ax = plt.subplots(1, 1)
+fig.set_size_inches((10,10))
+ax.plot(L[1], 0, 'ok')
+ax.text(L[1], 0, ' L2')
+ax.scatter(one_pts[:,0], one_pts[:,1], s=1, color='k', alpha=0.5)
+m = ax.scatter(zero_pts[:,0], zero_pts[:,1], s=zero_ev[:,7], c=zero_ev[:,7], cmap = 'jet')
+fig.colorbar(m)
+plt.gca().axis('equal')
+
+# Calculate delta-v for bounded motion near L1
+
+#if recalc:
+#    all_dv = []
+#    print('\nDV calculation started. N = ', zero_idx.shape[0])
+#    for i, idx in enumerate(zero_idx):
+#        y0 = ORB[idx][-1,:6]
+#        v = findVPlanes(mu1, y0, 0, planesL1, 0.1, int_param=int_param)
+#        all_dv.append(v.tolist())
+#        print(i, end=' ')
+#
+#    all_dv = np.array(all_dv)
+
+
+#evRev = {'ivar':iVarT, 'stopval': 2*np.pi, 'direction': 0, 'isterminal':True, 'corr':False}
+#evL2['stop'] = evRev
+
+J0 = jacobi_const(mu1, arr[0, :6].reshape(1, -1))[0]
+if recalc[2]:
+    print('\nCalculating L1 orbits geometry. N =', zero_idx.shape[0])
+    ORB_L1 = []
+    all_dv = []
+    for i, idx in enumerate(zero_idx):
+        y0 = ORB[idx][-1,:6]
+        print('\nOrbit [%03d]:'%i, end=' ')
+        lims, arr1, dv = orbit_geom(mu1, y0, evL2, L[1], beta=(0,0), nrevs=50, \
+                                    dv0=(0.05, rtol), \
+                                   retarr=True, retdv=True, int_param=int_param)
+        ORB_L1.append([lims, arr1])
+        all_dv.append(dv[0])
+
+    all_dv = np.array(all_dv)
+
+    J = []
+    for i, idx in enumerate(zero_idx):
+        y0 = ORB[idx][-1,:6].copy()
+        y0[3:5] += all_dv[i]
+        J.append(jacobi_const(mu1, y0.reshape(1, -1))[0])
+
+# Plot orbit with minimum dV
+fig, ax = plt.subplots(1, 1)
+fig.set_size_inches((15,10))
+i = np.argmin(np.linalg.norm(all_dv, axis=1))
+idx = zero_idx[i]
+ax.plot(ORB[idx][:,0],ORB[idx][:,1],'k', alpha=0.5)
+ax.plot(ORB[idx][0,0],ORB[idx][0,1],'+k')
+y0 = ORB[idx][-1,:6].copy()
+y0[3:5] += all_dv[i]
+arr1 = propCrtbp(mu1, y0, [0, 2*np.pi], int_param=int_param)
+ax.plot(arr1[:,0], arr1[:,1], 'r')
+ax.plot(L, [0]*len(L), 'ok')
+ax.text(L[1], 0, ' L2')
+ax.text(L[0], 0, ' L1')
+ax.plot(mu1, 0, 'ok')
+ax.text(mu1, 0, ' Земля')
+plt.gca().axis('equal')
+print('dv =', all_dv[i], 'T =', ORB[idx][-1,6])
+
+# dV on orbit plot
+fig, ax = plt.subplots(1, 1)
+fig.set_size_inches((10,10))
+ax.plot(L[1], 0, 'ok')
+ax.text(L[1], 0, ' L2')
+m = ax.scatter(zero_pts[:,0], zero_pts[:,1], c=np.linalg.norm(all_dv, axis=1), cmap = 'jet')
+ax.scatter(one_pts[:,0], one_pts[:,1], color='k', s=1)
+fig.colorbar(m)
+plt.gca().axis('equal')
+
+# Transfer time and dV combined plot VS orbit index
+#fig, ax = plt.subplots(1, 1)
+#fig.set_size_inches((15,10))
+#ax.set_yscale('log')
+#ax.tick_params('y', colors='b')
+#ax.plot(zero_idx, np.linalg.norm(all_dv, axis=1), '+b')
+#ax.add_patch(patches.Rectangle((0, ax.get_ylim()[0]), 
+#                               zero_idx[0],
+#                               ax.get_ylim()[1]-ax.get_ylim()[0],
+#                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+#ax.add_patch(patches.Rectangle((zero_idx[-1], ax.get_ylim()[0]), 
+#                               Nmanif-zero_idx[-1], 
+#                               ax.get_ylim()[1]-ax.get_ylim()[0],
+#                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+#for gap in gaps:
+#    ax.add_patch(patches.Rectangle((gap[0], ax.get_ylim()[0]), 
+#                                   gap[1]-gap[0], 
+#                                   ax.get_ylim()[1]-ax.get_ylim()[0],
+#                                   hatch='\\', fill=False, alpha=0.5, edgecolor='red'))
+#ax2 = ax.twinx()
+#ax2.tick_params('y', colors='r')
+#ax2.plot(zero_idx, zero_ev[:,7], '.r')
+#ax.set_xticks(range(0, Nmanif, 100))
+#ax.set_xlim([0, Nmanif])
+
+
+# Transfer time and dV combined plot VS time on initial orbit
+fig, ax = plt.subplots(1, 1)
+fig.set_size_inches((15,10))
+ax.set_yscale('log')
+ax.tick_params('y', colors='b')
+ax.plot(arr[zero_idx,6], np.linalg.norm(all_dv, axis=1), '.b')
+ax.add_patch(patches.Rectangle((0, ax.get_ylim()[0]), 
+                               arr[zero_idx[0], 6],
+                               ax.get_ylim()[1]-ax.get_ylim()[0],
+                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+ax.add_patch(patches.Rectangle((arr[zero_idx[-1], 6], ax.get_ylim()[0]), 
+                               arr[-1, 6]-arr[zero_idx[-1],6], 
+                               ax.get_ylim()[1]-ax.get_ylim()[0],
+                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+for gap in gaps:
+    if arr[gap[1],6]-arr[gap[0],6] > 0.1:
+        ax.add_patch(patches.Rectangle((arr[gap[0],6], ax.get_ylim()[0]), 
+                                       arr[gap[1],6]-arr[gap[0],6], 
+                                       ax.get_ylim()[1]-ax.get_ylim()[0],
+                                       hatch='\\', fill=False, alpha=0.5, edgecolor='red'))
+ax2 = ax.twinx()
+ax2.tick_params('y', colors='r')
+ax2.plot(arr[zero_idx,6], zero_ev[:,7], '.r')
+#ax2.plot(arr[zero_idx,6], J, '*g')
+ax.set_xticks(np.arange(0, arr[-1, 6], 0.2))
+ax.set_xlim([0, arr[-1, 6]])
+
+# Jacobi constant and dV combined plot VS time on initial orbit
+fig, ax = plt.subplots(1, 1)
+fig.set_size_inches((15,10))
+ax.set_yscale('log')
+ax.tick_params('y', colors='b')
+ax.plot(arr[zero_idx,6], np.linalg.norm(all_dv, axis=1), '.b')
+ax.add_patch(patches.Rectangle((0, ax.get_ylim()[0]), 
+                               arr[zero_idx[0], 6],
+                               ax.get_ylim()[1]-ax.get_ylim()[0],
+                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+ax.add_patch(patches.Rectangle((arr[zero_idx[-1], 6], ax.get_ylim()[0]), 
+                               arr[-1, 6]-arr[zero_idx[-1],6], 
+                               ax.get_ylim()[1]-ax.get_ylim()[0],
+                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+for gap in gaps:
+    if arr[gap[1],6]-arr[gap[0],6] > 0.1:
+        ax.add_patch(patches.Rectangle((arr[gap[0],6], ax.get_ylim()[0]), 
+                                       arr[gap[1],6]-arr[gap[0],6], 
+                                       ax.get_ylim()[1]-ax.get_ylim()[0],
+                                       hatch='\\', fill=False, alpha=0.5, edgecolor='red'))
+ax2 = ax.twinx()
+ax2.tick_params('y', colors='g')
+#ax2.plot(arr[zero_idx,6], zero_ev[:,7], '.r')
+ax2.plot(arr[zero_idx,6], J, '.g')
+ax2.plot(arr[[0,-1],6], [J0]*2, '-g')
+ax.set_xticks(np.arange(0, arr[-1, 6], 0.2))
+ax.set_xlim([0, arr[-1, 6]])
+
+#if recalc:
+ORB_L1_LIMS = []
+for o in ORB_L1:
+    ORB_L1_LIMS.append([list(i) for i in o[0]])
+
+ORB_L1_LIMS = np.array(ORB_L1_LIMS)
+
+# Az and dAz of target orbit plot VS time on initial orbit  
+fig, ax = plt.subplots(1, 1)
+fig.set_size_inches((15,10))
+ax.set_yscale('log')
+ax.tick_params('y', colors='b')
+ax.plot(arr[zero_idx,6], np.linalg.norm(all_dv, axis=1), '.b')
+ax.add_patch(patches.Rectangle((0, ax.get_ylim()[0]), 
+                               arr[zero_idx[0], 6],
+                               ax.get_ylim()[1]-ax.get_ylim()[0],
+                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+ax.add_patch(patches.Rectangle((arr[zero_idx[-1], 6], ax.get_ylim()[0]), 
+                               arr[-1, 6]-arr[zero_idx[-1],6], 
+                               ax.get_ylim()[1]-ax.get_ylim()[0],
+                               hatch='/', fill=False, alpha=0.5, edgecolor='red'))
+for gap in gaps:
+    if arr[gap[1],6]-arr[gap[0],6] > 0.1:
+        ax.add_patch(patches.Rectangle((arr[gap[0],6], ax.get_ylim()[0]), 
+                                       arr[gap[1],6]-arr[gap[0],6], 
+                                       ax.get_ylim()[1]-ax.get_ylim()[0],
+                                       hatch='\\', fill=False, alpha=0.5, edgecolor='red'))
+ax2 = ax.twinx()
+ax2.tick_params('y', colors='r')
+#ax2.plot(arr[zero_idx,6], ORB_L1_LIMS[:, 2, 1]*ER, '+r')
+for i, idx in enumerate(zero_idx):
+    ax2.plot([arr[idx,6]]*2, [ORB_L1_LIMS[i, 2, 1]*ER, ORB_L1_LIMS[i, 2, 3]*ER], '-r', alpha=0.5)
+ax2.plot(arr[[0,-1],6], [Z0km]*2, '-r', alpha=0.5)
+#ax2.plot(arr[zero_idx,6], zero_ev[:,7], '.r')
+#ax2.plot(arr[zero_idx,6], J, '*g')
+ax.set_xticks(np.arange(0, arr[-1, 6], 0.2))
+ax.set_xlim([0, arr[-1, 6]])
+
+
+# Plot orbit with maximum Az
+fig, ax = plt.subplots(1, 1)
+fig.set_size_inches((15,10))
+i = np.argmin(np.linalg.norm(all_dv, axis=1))
+#i = np.argmax(ORB_L1_LIMS[:, 2, 1])
+idx = zero_idx[i]
+ax.plot(ORB[idx][:,1],ORB[idx][:,2],'k', alpha=0.5)
+ax.plot(ORB[idx][0,1],ORB[idx][0,2],'+k')
+ax.plot(ORB_L1[i][1][:,1],ORB_L1[i][1][:,2],'r')
+#ax.plot(L, [0]*len(L), 'ok')
+#ax.text(L[1], 0, ' L2')
+#ax.text(L[0], 0, ' L1')
+#ax.plot(mu1, 0, 'ok')
+#ax.text(mu1, 0, ' Земля')
+plt.gca().axis('equal')
+print('dv =', all_dv[i], 'T =', ORB[idx][-1,6])
